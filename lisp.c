@@ -30,9 +30,17 @@ struct lisp_env {
     lisp_val** lisp_vals;
 };
 
+mpc_parser_t* Number;
+mpc_parser_t* Symbol;
+mpc_parser_t* String;
+mpc_parser_t* Comment;
+mpc_parser_t* Sexpr;
+mpc_parser_t* Qexpr;
+mpc_parser_t* Expr;
+mpc_parser_t* Lispy;
 
 enum { LISP_VAL_NUM, LISP_VAL_ERR, LISP_VAL_SYMBOL, 
-       LISP_VAL_SEXPR, LISP_VAL_QEXPR, LISP_VAL_FUNC. LISP_VAL_STRING};
+       LISP_VAL_SEXPR, LISP_VAL_QEXPR, LISP_VAL_FUNC, LISP_VAL_STRING};
 enum { ERROR_DIV_ZERO, ERROR_BAD_OP, ERROR_BAD_NUM };
 
 //macro
@@ -237,7 +245,7 @@ lisp_val* lisp_val_read(mpc_ast_t* t) {
 
     if (strstr(t->tag, "number")) { return lisp_val_read_num(t); }
     if (strstr(t->tag, "symbol")) { return create_lv_symbol(t->contents); }
-    if(strstr(t->tag, "string")) { return lisp_val_read_string(t); }
+    if (strstr(t->tag, "string")) { return lisp_val_read_string(t); }
 
     lisp_val* x = NULL;
     if (strcmp(t->tag, ">") == 0) { x = create_lv_sexpr(); }
@@ -245,6 +253,7 @@ lisp_val* lisp_val_read(mpc_ast_t* t) {
     if (strstr(t->tag, "qexpr"))  { x = create_lv_qexpr(); }
     // the lisp val is a s-expression. add the children to the lisp val, then return
     for (int i = 0; i < t->children_num; i++) {
+        if (strstr(t->children[i]->tag, "comment")) { continue; }
         if (strcmp(t->children[i]->contents, "(") == 0) { continue; }
         if (strcmp(t->children[i]->contents, ")") == 0) { continue; }
         if (strcmp(t->children[i]->contents, "{") == 0) { continue; }
@@ -345,8 +354,8 @@ char* readline(char* prompt) {
   fputs(prompt, stdout);
   char *line = NULL;
   size_t len = 0;
-  ssize_t lineSize = 0;
-  lineSize = getline(&line, &len, stdin);
+  ssize_t ilen;
+  ilen = getline(&line, &len, stdin);
   return line;
 }
 
@@ -717,20 +726,6 @@ lisp_val* builtin_op(lisp_env* e, lisp_val* a, char* op) {
     return x;
 }
 
-//lisp_val* builtin(lisp_val* a, char* op) {
-//    if (strcmp("list", op) == 0) { return builtin_list(a); }
-//    if (strcmp("head", op) == 0) { return builtin_head(a); }
-//    if (strcmp("tail", op) == 0) { return builtin_tail(a); }
-//    if (strcmp("join", op) == 0) { return builtin_join(a); }
-//    if (strcmp("eval", op) == 0) { return builtin_eval(a); }
-//    if (strcmp("cons", op) == 0) { return builtin_cons(a); }
-//    if (strcmp("init", op) == 0) { return builtin_init(a); }
-//    if (strcmp("len", op) == 0) { return builtin_len(a); }
-//    if (strstr("+-/*^%", op)) { return builtin_op(a, op); }
-//    free_lisp_val(a);
-//    return create_lv_err("Unknown Function!");
-//}
-
 lisp_val* builtin_add(lisp_env* e, lisp_val* v) {
     return builtin_op(e, v, "+");
 }
@@ -748,6 +743,43 @@ lisp_val* builtin_mul(lisp_env* e, lisp_val* v) {
 
 lisp_val* builtin_div(lisp_env* e, lisp_val* v) {
     return builtin_op(e, v, "/");
+}
+
+lisp_val* builtin_print(lisp_env* e, lisp_val* v) {
+    for(int i = 0; i < v->count; i++) {
+        lisp_val_print(v->cell[i]);
+        putchar(' ');
+    }
+    putchar('\n');
+    free_lisp_val(v);
+
+    return create_lv_sexpr();
+}
+
+lisp_val* builtin_load(lisp_env* e, lisp_val* v) {
+    mpc_result_t r;
+    if (mpc_parse_contents(v->cell[0]->string, Lispy, &r)) {
+        lisp_val* expr = lisp_val_read(r.output);
+        mpc_ast_delete(r.output);
+        while (expr->count) {
+            lisp_val* x = lisp_val_eval(e, lisp_val_pop(expr, 0));
+            if (x->type == LISP_VAL_ERR) { lisp_val_print(x); }
+            free_lisp_val(x);
+        }
+        free_lisp_val(expr);
+        free_lisp_val(v);
+        return create_lv_sexpr();
+    } 
+    else {
+        char* err = mpc_err_string(r.error);
+        mpc_err_delete(r.error);
+
+        lisp_val* lv_err = create_lv_err("Could not load Library %s", err);
+        free(err);
+        free_lisp_val(v);
+
+        return lv_err;
+    }
 }
 
 int lisp_val_equals(lisp_val* x1, lisp_val* x2) {
@@ -886,6 +918,9 @@ void lisp_env_add_builtins(lisp_env* e) {
     lisp_env_add_builtin(e, ">=", builtin_gte);
     lisp_env_add_builtin(e, "<=", builtin_lte);
     lisp_env_add_builtin(e, "if", builtin_if);
+       
+    lisp_env_add_builtin(e, "load",  builtin_load);
+    lisp_env_add_builtin(e, "print", builtin_print);
 }
 
 lisp_val* lisp_val_eval_sexpr(lisp_env* e, lisp_val* v);
@@ -936,59 +971,70 @@ lisp_val* lisp_val_eval_sexpr(lisp_env* e, lisp_val* v) {
 
 //main method, asks for user input and returns result
 int main(int argc, char** argv) {
-
     // MPC library used for AST creation. For more info, see buildyourownlisp(dot)com
-    mpc_parser_t* Number = mpc_new("number");
-    mpc_parser_t* Symbol = mpc_new("symbol");
-    mpc_parser_t* Sexpr  = mpc_new("sexpr");
-    mpc_parser_t* Qexpr  = mpc_new("qexpr");
-    mpc_parser_t* Expr   = mpc_new("expr");
-    mpc_parser_t* Lispy  = mpc_new("lispy");
+    Number = mpc_new("number");
+    Symbol = mpc_new("symbol");
+    String = mpc_new("string");
+    Comment= mpc_new("comment");
+    Sexpr  = mpc_new("sexpr");
+    Qexpr  = mpc_new("qexpr");
+    Expr   = mpc_new("expr");
+    Lispy  = mpc_new("lispy");
     
     mpca_lang(MPCA_LANG_DEFAULT,
       "                                                      \
         number : /-?[0-9]+/ ;                                \
-        string  : /\"(\\\\.|[^\"])*\"/ ;                     \
         symbol : /[a-zA-Z0-9_+\\-*\\/\\\\=<>!&]+/ ;          \
+        string : /\"(\\\\.|[^\"])*\"/ ;                      \
+        comment: /;[^\\r\\n]*/ ;                             \
         sexpr  : '(' <expr>* ')' ;                           \
         qexpr  : '{' <expr>* '}' ;                           \
-        expr   : <number> | <symbol> | <sexpr> | <qexpr>;    \
+        expr   : <number> | <symbol> | <sexpr> | <qexpr>     \
+                 | <string> | <comment>                 ;    \
         lispy  : /^/ <expr>* /$/ ;                           \
       ",
-      Number, Symbol, Sexpr, Qexpr, Expr, Lispy);
+      Number, Symbol, String, Comment, Sexpr, Qexpr, Expr, Lispy);
 
-  printf("Clisp terminal\r\n");
-  printf("Type 'exit' to exit, or ctrl-c.\r\n");
-  lisp_env* e = create_lisp_env();
-  lisp_env_add_builtins(e);
-  
-  while (1) {
-  
-    char* input = readline("clisp> ");
-    char* ex = input;
-    ex[strlen(ex) - 1] = '\0';
-    if(strcmp(ex, "exit") == 0) {
-        printf("Later!\r\n");
-        exit(0);
+    printf("Clisp terminal\r\n");
+    printf("Type 'exit' to exit, or ctrl-c.\r\n");
+    lisp_env* e = create_lisp_env();
+    lisp_env_add_builtins(e);
+    if(argc >= 2) {
+        for(int i = 1; i < argc; i++) {
+            lisp_val* args = lisp_val_add(create_lv_sexpr(), create_lv_string(argv[i]));
+            lisp_val* x = builtin_load(e, args);
+            if(x->type == LISP_VAL_ERR) {
+                lisp_val_print(x);
+            }
+            free_lisp_val(x);
+        }
     }
-    // parse user input
-    mpc_result_t r;
-    if (mpc_parse("<stdin>", input, Lispy, &r)) {
-        lisp_val* lv = lisp_val_eval(e, lisp_val_read(r.output));
-        lisp_val_print(lv);
-        printf("\r\n");
-        free_lisp_val(lv);
-        mpc_ast_delete(r.output);
-    } else {
-        mpc_err_print(r.error);
-        mpc_err_delete(r.error);
-    }
-    
-    free(input);
+  
+    while (1) {
+        char* input = readline("clisp> ");
+        char* ex = input;
+        ex[strlen(ex) - 1] = '\0';
+        if(strcmp(ex, "exit") == 0) {
+            printf("Later!\r\n");
+            exit(0);
+        }
+        // parse user input
+        mpc_result_t r;
+        if (mpc_parse("<stdin>", input, Lispy, &r)) {
+            lisp_val* lv = lisp_val_eval(e, lisp_val_read(r.output));
+            lisp_val_print(lv);
+            printf("\r\n");
+            free_lisp_val(lv);
+            mpc_ast_delete(r.output);
+        } else {
+            mpc_err_print(r.error);
+            mpc_err_delete(r.error);
+        }
+        free(input);
   }
   
   // delete parsers
-  mpc_cleanup(6, Number, Symbol, Sexpr, Qexpr, Expr, Lispy);
+  mpc_cleanup(8, Number, Symbol, String, Comment, Sexpr, Qexpr, Expr, Lispy);
 
   // delete environment
   free_lisp_env(e);
