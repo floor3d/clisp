@@ -14,6 +14,7 @@ struct lisp_val {
     long num;
     char* err;
     char* symbol;
+    char* string;
     lisp_builtin builtin;
     lisp_env* env;
     lisp_val* formals;
@@ -30,7 +31,8 @@ struct lisp_env {
 };
 
 
-enum { LISP_VAL_NUM, LISP_VAL_ERR, LISP_VAL_SYMBOL, LISP_VAL_SEXPR, LISP_VAL_QEXPR, LISP_VAL_FUNC};
+enum { LISP_VAL_NUM, LISP_VAL_ERR, LISP_VAL_SYMBOL, 
+       LISP_VAL_SEXPR, LISP_VAL_QEXPR, LISP_VAL_FUNC. LISP_VAL_STRING};
 enum { ERROR_DIV_ZERO, ERROR_BAD_OP, ERROR_BAD_NUM };
 
 //macro
@@ -106,7 +108,7 @@ lisp_env* create_lisp_env() {
     return e;
 }
 
-//method to crete lisp lambda
+//method to create lisp lambda
 lisp_val* create_lv_lambda(lisp_val* formals, lisp_val* body) {
     lisp_val* v = malloc(sizeof(lisp_val));
     v->type = LISP_VAL_FUNC;
@@ -117,6 +119,14 @@ lisp_val* create_lv_lambda(lisp_val* formals, lisp_val* body) {
     return v;
 }
 
+//method to create lisp string
+lisp_val* create_lv_string(char* string) {
+    lisp_val* v = malloc(sizeof(lisp_val));
+    v->type = LISP_VAL_STRING;
+    v->string = malloc(strlen(string) + 1);
+    strcpy(v->string, string);
+    return v;
+}
 
 void free_lisp_val(lisp_val* v);
 
@@ -208,6 +218,17 @@ lisp_val* lisp_val_add_at_head(lisp_val* orig, lisp_val* add) {
     return orig;
 }
 
+// read lisp val string
+lisp_val* lisp_val_read_string(mpc_ast_t* t) {
+    t->contents[strlen(t->contents)-1] = '\0';
+    char* unescaped = malloc(strlen(t->contents+1)+1);
+    strcpy(unescaped, t->contents+1);
+    unescaped = mpcf_unescape(unescaped);
+    lisp_val* str = create_lv_string(unescaped);
+    free(unescaped);
+    return str;
+}
+
 //'read' a lisp val, based on the AST created from user input:
 // number --> return num lisp val
 // symbol --> return symbol lisp val 
@@ -216,6 +237,7 @@ lisp_val* lisp_val_read(mpc_ast_t* t) {
 
     if (strstr(t->tag, "number")) { return lisp_val_read_num(t); }
     if (strstr(t->tag, "symbol")) { return create_lv_symbol(t->contents); }
+    if(strstr(t->tag, "string")) { return lisp_val_read_string(t); }
 
     lisp_val* x = NULL;
     if (strcmp(t->tag, ">") == 0) { x = create_lv_sexpr(); }
@@ -249,10 +271,20 @@ void lisp_val_expr_print(lisp_val* v, char open, char close) {
   putchar(close);
 }
 
+// print lisp val string
+void print_lisp_val_string(lisp_val* v) {
+    char* mpc_escaped_string = malloc(strlen(v->string) + 1);
+    strcpy(mpc_escaped_string, v->string);
+    mpc_escaped_string = mpcf_escape(mpc_escaped_string);
+    printf("\"%s\"", mpc_escaped_string);
+    free(mpc_escaped_string);
+}
+
 // print lisp value depending on its contents
 void lisp_val_print(lisp_val* v) {
   switch (v->type) {
     case LISP_VAL_NUM:   printf("%li", v->num); break;
+    case LISP_VAL_STRING: print_lisp_val_string(v); break;
     case LISP_VAL_FUNC: 
         if(v->builtin) {
         printf("<builtin>");
@@ -280,6 +312,7 @@ void free_lisp_val(lisp_val* v) {
 
         // if num or func, stack only so no free necessary
         case LISP_VAL_NUM: break;
+        case LISP_VAL_STRING: free(v->string); break;
         case LISP_VAL_FUNC: 
             if(!v->builtin) {
                 free_lisp_env(v->env);
@@ -340,6 +373,7 @@ lisp_val* lisp_val_copy(lisp_val* v) {
         break;
 
     case LISP_VAL_NUM: x->num = v->num; break;
+    case LISP_VAL_STRING: x->string = malloc(strlen(v->string) + 1); strcpy(x->string, v->string); break;
 
     case LISP_VAL_ERR:
       x->err = malloc(strlen(v->err) + 1);
@@ -722,6 +756,7 @@ int lisp_val_equals(lisp_val* x1, lisp_val* x2) {
     }
     switch(x1->type) {
         case LISP_VAL_NUM:    return x1->num == x2->num;
+        case LISP_VAL_STRING: return strcmp(x1->string, x2->string) == 0;
         case LISP_VAL_ERR:    return strcmp(x1->err, x2->err) == 0;
         case LISP_VAL_SYMBOL: return strcmp(x1->symbol, x2->symbol) == 0;
         case LISP_VAL_QEXPR:
@@ -913,6 +948,7 @@ int main(int argc, char** argv) {
     mpca_lang(MPCA_LANG_DEFAULT,
       "                                                      \
         number : /-?[0-9]+/ ;                                \
+        string  : /\"(\\\\.|[^\"])*\"/ ;                     \
         symbol : /[a-zA-Z0-9_+\\-*\\/\\\\=<>!&]+/ ;          \
         sexpr  : '(' <expr>* ')' ;                           \
         qexpr  : '{' <expr>* '}' ;                           \
